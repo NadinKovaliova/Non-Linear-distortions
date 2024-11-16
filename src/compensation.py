@@ -66,16 +66,16 @@ class HearingCompensator:
         """
         Processes the audio data to compensate for non-linear distortions.
         """
-        # Check the length of the audio data
         audio_length = len(audio_data)
 
-        if audio_length < 16:  # Extremely short audio files
-            print("Audio is too short for spectrogram processing. Returning input audio.")
-            return audio_data  # Return the original audio without modifications
+        if audio_length < 16:  # Extremely short files
+            print("Audio too short for spectrogram processing; applying linear gain.")
+            gain_factor = 1.2  # Example gain factor for compensation
+            return audio_data * gain_factor
 
-        # Dynamically set nperseg and noverlap
-        nperseg = min(2048, audio_length)
-        noverlap = min(nperseg // 2, audio_length // 2)  # Ensure noverlap < nperseg
+        # Dynamically set nperseg and noverlap based on audio length
+        nperseg = min(2048, audio_length)  # Use 2048 or the length of the audio, whichever is smaller
+        noverlap = max(0, nperseg // 2)    # Set overlap to half of nperseg, ensuring it is always valid
 
         # Transform audio to frequency domain
         frequencies, times, spec = signal.spectrogram(audio_data, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
@@ -99,6 +99,7 @@ class HearingCompensator:
         _, compensated_audio = signal.istft(spec_linear, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
 
         return compensated_audio
+
 
 
 def process_audio_file(input_file, output_file):
