@@ -1,5 +1,5 @@
 import os
-from compensation import process_audio_file
+from compensation import process_audio_file, load_audio
 
 # Define paths
 UPLOAD_FOLDER = "../upload"
@@ -19,6 +19,15 @@ def process_all_files(upload_folder, result_folder):
         if os.path.isfile(input_path) and filename.endswith((".wav", ".mp3", ".flac")):
             output_path = os.path.join(result_folder, filename)
             print(f"Processing {filename}...")
+
+            audio_data, sample_rate = load_audio(input_path)
+
+            if audio_data is None or sample_rate is None:
+                print(f"Failed to load {input_path}. Skipping...")
+                return
+            print(f"Audio length (samples): {len(audio_data)}, Sample rate: {sample_rate}")
+            
+
             try:
                 # Process the audio file
                 process_audio_file(input_path, output_path)

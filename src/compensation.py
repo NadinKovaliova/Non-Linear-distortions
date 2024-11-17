@@ -1,7 +1,30 @@
 import numpy as np
 from scipy import signal
+from scipy.io import wavfile
 import soundfile as sf
 from scipy.interpolate import interp1d
+from pydub import AudioSegment
+
+def load_audio(file_path):
+    """
+    Load audio data and return a NumPy array and the sample rate.
+    Supports WAV and other formats via pydub.
+    """
+    try:
+        # Use pydub for flexible format handling
+        audio = AudioSegment.from_file(file_path)
+        audio = audio.set_frame_rate(44100).set_sample_width(2)  # Set sample rate and bit depth without changing channels
+        sample_rate = audio.frame_rate
+        audio_data = np.array(audio.get_array_of_samples(), dtype=np.float32) / np.iinfo(np.int16).max
+        
+        # If the audio is stereo, reshape it to have two channels
+        if audio.channels == 2:
+            audio_data = audio_data.reshape(-1, 2)  # Reshape to (samples, 2) for stereo
+        
+        return audio_data, sample_rate
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None, None
 
 class HearingCompensator:
     def __init__(self):
@@ -67,17 +90,25 @@ class HearingCompensator:
         Processes the audio data to compensate for non-linear distortions.
         """
         audio_length = len(audio_data)
-
-        if audio_length < 16:  # Extremely short files
-            print("Audio too short for spectrogram processing; applying linear gain.")
-            gain_factor = 1.2  # Example gain factor for compensation
-            return audio_data * gain_factor
-
         # Dynamically set nperseg and noverlap based on audio length
-        nperseg = min(2048, audio_length)  # Use 2048 or the length of the audio, whichever is smaller
-        noverlap = max(0, nperseg // 2)    # Set overlap to half of nperseg, ensuring it is always valid
+        if audio_length < 2048:
+            nperseg = audio_length  # If audio is shorter than 2048, use the audio length
+        else:
+            nperseg = 2048  # Otherwise, use the default segment length
 
-        # Transform audio to frequency domain
+        # Ensure noverlap is less than nperseg
+        #noverlap = min(nperseg // 2, audio_length // 2)
+
+
+
+        # If the calculated overlap is not less than nperseg, adjust it
+        #if noverlap >= nperseg:
+           # noverlap = nperseg - 1
+
+        print(f"Using nperseg={nperseg}, noverlap={noverlap}, audio_length={audio_length}")
+
+
+        # Transform audio to frequency domain (works for stereo)
         frequencies, times, spec = signal.spectrogram(audio_data, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
         spec_db = 10 * np.log10(spec + 1e-10)
 
@@ -94,7 +125,7 @@ class HearingCompensator:
         # Apply harmonic reduction
         spec_db = self.harmonic_reduction(frequencies, spec_db)
 
-        # Convert back to time domain
+        # Convert back to time domain (preserve stereo)
         spec_linear = 10 ** (spec_db / 10)
         _, compensated_audio = signal.istft(spec_linear, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
 
