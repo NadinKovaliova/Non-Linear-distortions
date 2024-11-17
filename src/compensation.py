@@ -28,116 +28,137 @@ def load_audio(file_path):
 
 class HearingCompensator:
     def __init__(self):
-        self.threshold_db = 40
-        self.max_compression_db = 120
-        self.compression_ratio = 1000
-
-    def iso_compensation(self, frequencies):
-        """
-        Applies ISO 226 compensation to balance perceived loudness across frequencies.
-        """
-        # ISO 226 data for perceived loudness
-        iso_frequencies = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
-        iso_sensitivity = [75, 60, 50, 40, 30, 25, 20, 30, 50, 70]  # Example sensitivity curve
+        # Константы из исследований Алдошиной
+        self.threshold_db = 40  # Порог появления субъективных гармоник
+        self.max_compression_db = 120  # Максимальный уровень компрессии
+        self.compression_ratio = 1000  # Динамический диапазон слухового нерва
         
-        # Interpolate to match spectrogram frequencies
-        iso_curve = interp1d(iso_frequencies, iso_sensitivity, kind="linear", fill_value="extrapolate")
-        return iso_curve(frequencies)
+    def calculate_subjective_harmonics(self, frequency, level_db):
+        """
+        Расчет уровней субъективных гармоник для заданной частоты
+        На основе данных из статьи: при 80 дБ на 1000 Гц вторая гармоника = 63 дБ
+        """
+        if level_db < self.threshold_db:
+            return []
+        
+        harmonics = []
+        for n in range(2, 5):  # Расчет до 4-й гармоники
+            # Формула получена из соотношения 80:63 для первой гармоники
+            harmonic_level = level_db - (17 * (n-1))
+            if harmonic_level > 0:
+                harmonics.append({
+                    'frequency': frequency * n,
+                    'level': harmonic_level
+                })
+        return harmonics
 
-    def apply_dynamic_compression(self, signal_db):
+    def calculate_combination_tones(self, f1, f2, level_db):
         """
-        Compresses the dynamic range of the signal.
+        Расчет комбинационных тонов для двух частот
         """
+        if level_db < 50:  # Порог для простых разностных тонов
+            return []
+        
+        combination_tones = []
+        # Простой разностный тон
+        diff_tone = abs(f2 - f1)
+        diff_level = level_db - 20  # Примерно на 20 дБ ниже основного
+        
+        # Кубичный разностный тон
+        cubic_tone = 2 * f1 - f2
+        cubic_level = level_db - 25  # Примерно на 25 дБ ниже основного
+        
+        if diff_level > 0:
+            combination_tones.append({
+                'frequency': diff_tone,
+                'level': diff_level,
+                'type': 'difference'
+            })
+        
+        if cubic_level > 0:
+            combination_tones.append({
+                'frequency': cubic_tone,
+                'level': cubic_level,
+                'type': 'cubic'
+            })
+            
+        return combination_tones
+
+    def apply_compression(self, signal_db):
+        """
+        Применение нелинейной компрессии по модели слухового аппарата
+        """
+        # Нормализация к диапазону слухового нерва
         compressed = np.zeros_like(signal_db)
         for i, level in enumerate(signal_db):
             if level < self.threshold_db:
+                # Линейное усиление для слабых сигналов
                 compressed[i] = level * 1.2
             else:
+                # Нелинейная компрессия для сильных сигналов
                 compressed[i] = self.threshold_db + (level - self.threshold_db) / 2
+                
         return compressed
-
-    def spectral_masking(self, frequencies, spectrogram):
-        """
-        Applies spectral masking to simulate the effect of one frequency masking another.
-        """
-        masked_spec = np.copy(spectrogram)
-        for i in range(1, len(frequencies)):
-            masked_spec[i] -= masked_spec[i - 1] * 0.5  # Example masking effect
-        return np.maximum(masked_spec, 0)  # Avoid negative values
-
-    def apply_phase_distortion(self, spectrogram):
-        """
-        Introduces phase shifts to simulate real-world distortions.
-        """
-        phase_shifts = np.random.uniform(-np.pi / 4, np.pi / 4, spectrogram.shape)
-        return spectrogram * np.exp(1j * phase_shifts)  # Apply phase shift as a complex multiplier
-
-    def harmonic_reduction(self, frequencies, spectrogram):
-        """
-        Reduces the volume of harmonics to prevent harshness.
-        """
-        reduced_spec = np.copy(spectrogram)
-        for i, freq in enumerate(frequencies):
-            harmonics = [freq * n for n in range(2, 5)]
-            for harmonic in harmonics:
-                harm_idx = np.argmin(np.abs(frequencies - harmonic))
-                if harm_idx < len(frequencies):
-                    reduced_spec[harm_idx] *= 0.7  # Reduce harmonic level by 30%
-        return reduced_spec
 
     def compensate_audio(self, audio_data, sample_rate):
         """
-        Processes the audio data to compensate for non-linear distortions.
+        Основная функция компенсации искажений для аудиофайла
         """
-        audio_length = len(audio_data)
-        # Dynamically set nperseg and noverlap based on audio length
-        if audio_length < 2048:
-            nperseg = audio_length  # If audio is shorter than 2048, use the audio length
-        else:
-            nperseg = 2048  # Otherwise, use the default segment length
-
-        # Ensure noverlap is less than nperseg
-        #noverlap = min(nperseg // 2, audio_length // 2)
-
-
-
-        # If the calculated overlap is not less than nperseg, adjust it
-        #if noverlap >= nperseg:
-           # noverlap = nperseg - 1
-
-        print(f"Using nperseg={nperseg}, noverlap={noverlap}, audio_length={audio_length}")
-
-
-        # Transform audio to frequency domain (works for stereo)
-        frequencies, times, spec = signal.spectrogram(audio_data, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+        # Преобразование в частотную область
+        frequencies, times, spec = signal.spectrogram(
+            audio_data, 
+            fs=sample_rate,
+            nperseg=2048,
+            noverlap=1024
+        )
+        
+        # Преобразование в дБ
         spec_db = 10 * np.log10(spec + 1e-10)
-
-        # Apply ISO compensation
-        iso_curve = self.iso_compensation(frequencies)
-        spec_db += iso_curve[:, np.newaxis]
-
-        # Apply dynamic compression
-        spec_db = self.apply_dynamic_compression(spec_db)
-
-        # Apply spectral masking
-        spec_db = self.spectral_masking(frequencies, spec_db)
-
-        # Apply harmonic reduction
-        spec_db = self.harmonic_reduction(frequencies, spec_db)
-
-        # Convert back to time domain (preserve stereo)
-        spec_linear = 10 ** (spec_db / 10)
-        _, compensated_audio = signal.istft(spec_linear, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
-
+        
+        # Компенсация для каждого частотно-временного блока
+        compensated_spec = np.zeros_like(spec_db)
+        
+        for i, freq in enumerate(frequencies):
+            for j, time in enumerate(times):
+                level = spec_db[i, j]
+                
+                # Применение компрессии
+                compressed_level = self.apply_compression(np.array([level]))[0]
+                
+                # Расчет и компенсация гармоник
+                harmonics = self.calculate_subjective_harmonics(freq, level)
+                for harmonic in harmonics:
+                    harm_idx = np.argmin(np.abs(frequencies - harmonic['frequency']))
+                    if harm_idx < len(frequencies):
+                        compensated_spec[harm_idx, j] -= harmonic['level']
+                
+                compensated_spec[i, j] = compressed_level
+        
+        # Обратное преобразование в линейный масштаб
+        compensated_spec = 10 ** (compensated_spec / 10)
+        
+        # Обратное преобразование во временную область
+        _, compensated_audio = signal.istft(
+            compensated_spec,
+            fs=sample_rate,
+            nperseg=2048,
+            noverlap=1024
+        )
+        
         return compensated_audio
-
-
 
 def process_audio_file(input_file, output_file):
     """
-    Processes an audio file with the compensator.
+    Обработка аудиофайла с компенсацией нелинейных искажений
     """
+    # Загрузка аудио
     audio_data, sample_rate = sf.read(input_file)
+    
+    # Создание компенсатора
     compensator = HearingCompensator()
+    
+    # Применение компенсации
     compensated_audio = compensator.compensate_audio(audio_data, sample_rate)
+    
+    # Сохранение результата
     sf.write(output_file, compensated_audio, sample_rate)
