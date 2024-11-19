@@ -102,9 +102,3 @@ Modify `compensation.py` to adjust:
 - Not a medical device
 - Individual hearing variations not fully accounted for
 - Recommended for general audio enhancement
-
-## Contributing
-Contributions are welcome! Please submit pull requests or open issues.
-
-## License
-[Insert your license here]
