@@ -5,12 +5,10 @@ import soundfile as sf
 from scipy.interpolate import interp1d
 from pydub import AudioSegment
 import os
-import logging
 import librosa
+import matplotlib.pyplot as plt
 
 
-# Configure logging
-#logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 def load_audio(file_path):
@@ -95,23 +93,24 @@ class HearingCompensator:
 
     def apply_compression(self, signal_db):
         """
-        Применение нелинейной компрессии по модели слухового аппарата
+        Apply non-linear compression based on auditory model.
         """
-        # Нормализация к диапазону слухового нерва
         compressed = np.zeros_like(signal_db)
-        for i, level in enumerate(signal_db):
+        for i, level in np.ndenumerate(signal_db):  # Support multi-dimensional arrays
             if level < self.threshold_db:
-                # Линейное усиление для слабых сигналов
-                compressed[i] = level * 1.2
+                compressed[i] = level * 1.2  # Mild linear amplification
             else:
-                # Нелинейная компрессия для сильных сигналов
-                compressed[i] = self.threshold_db + (level - self.threshold_db) / 2
-                
-        return np.clip(compressed, -120, 0)  # Keep within a reasonable dB range
+                compressed[i] = self.threshold_db + (level - self.threshold_db) / 2  # Non-linear compression
+        return compressed
 
     def compensate_audio(self, audio_data, sample_rate):
-            
+        """
+        Targeted hearing compensation method with spectrogram visualization.
+        """
+        # Ensure result directory exists
+        os.makedirs('../result', exist_ok=True)
 
+        # Separate stereo channels or handle mono audio
         if audio_data.ndim == 2 and audio_data.shape[1] == 2:
             left_channel = audio_data[:, 0]
             right_channel = audio_data[:, 1]
@@ -119,34 +118,95 @@ class HearingCompensator:
             left_channel = audio_data
             right_channel = audio_data
 
-        # Compute spectrograms
-        frequencies, times, spec_left = signal.spectrogram(left_channel, fs=sample_rate, nperseg=2048, noverlap=1024)
-        _, _, spec_right = signal.spectrogram(right_channel, fs=sample_rate, nperseg=2048, noverlap=1024)
+        # Visualize input spectrogram
+        plt.figure(figsize=(15, 5))
+        plt.subplot(1, 2, 1)
+        plt.title("Input Spectrogram")
+        
+        # Compute input spectrogram
+        f_input, t_input, Sxx_input = signal.spectrogram(left_channel, fs=sample_rate)
+        plt.pcolormesh(t_input, f_input, 10 * np.log10(Sxx_input), shading='gouraud', cmap='viridis')
+        plt.ylabel('Frequency [Hz]')
+        plt.xlabel('Time [sec]')
+        plt.colorbar(label='Intensity [dB]')
 
-        # Convert to dB
-        spec_left_db = 10 * np.log10(spec_left + 1e-10)
-        spec_right_db = 10 * np.log10(spec_right + 1e-10)
+        def apply_hearing_compensation(channel):
 
-        # Apply compensation (simplified for clarity)
-        compensated_spec_left_db = self.apply_compression(spec_left_db.flatten()).reshape(spec_left_db.shape)
-        compensated_spec_right_db = self.apply_compression(spec_right_db.flatten()).reshape(spec_right_db.shape)
+            # Use librosa for spectral processing
+            n_fft = 2048
+            hop_length = 512
+            
+            # Perform Short-Time Fourier Transform
+            stft = librosa.stft(channel, n_fft=n_fft, hop_length=hop_length)
+            
+            # Define a frequency-dependent compensation curve
+            frequencies = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
+            
+            # Compensation curve - boost mid and high frequencies
+            compensation_curve = np.ones_like(frequencies)
+            
+            # Boost around 2-4 kHz (critical speech intelligibility region)
+            speech_boost_mask = (frequencies >= 2000) & (frequencies <= 4000)
+            compensation_curve[speech_boost_mask] *= 1.5
+            
+            # Additional boost for high frequencies
+            high_freq_mask = frequencies > 4000
+            compensation_curve[high_freq_mask] *= 1.8
+            
+            # Apply compensation to magnitude spectrum
+            magnitude = np.abs(stft)
+            compensated_magnitude = magnitude * compensation_curve[:, np.newaxis]
+            
+            # Reconstruct the complex spectrum
+            compensated_stft = compensated_magnitude * np.exp(1j * np.angle(stft))
+            
+            # Inverse STFT to get time-domain signal
+            compensated_channel = librosa.istft(
+                compensated_stft, 
+                hop_length=hop_length, 
+                length=len(channel)
+            )
+            
+            # Soft dynamic range compression
+            def soft_compress(x, threshold=0.5):
+                return np.sign(x) * (1 - np.exp(-np.abs(x) * threshold))
+            
+            compensated_channel = soft_compress(compensated_channel)
+            
+            return compensated_channel
 
-        # Avoid unnecessary conversions; directly perform ISTFT
-        _, compensated_audio_left = signal.istft(
-            10 ** (compensated_spec_left_db / 10), fs=sample_rate, nperseg=2048, noverlap=1024
-        )
-        _, compensated_audio_right = signal.istft(
-            10 ** (compensated_spec_right_db / 10), fs=sample_rate, nperseg=2048, noverlap=1024
-        )
+        # Apply compensation to each channel
+        compensated_left = apply_hearing_compensation(left_channel)
+        compensated_right = apply_hearing_compensation(right_channel)
 
-        # Normalize
-        compensated_audio = np.vstack((compensated_audio_left, compensated_audio_right)).T
+        # Visualize output spectrogram
+        plt.subplot(1, 2, 2)
+        plt.title("Compensated Spectrogram")
+        
+        # Compute output spectrogram
+        f_output, t_output, Sxx_output = signal.spectrogram(compensated_left, fs=sample_rate)
+        plt.pcolormesh(t_output, f_output, 10 * np.log10(Sxx_output), shading='gouraud', cmap='viridis')
+        plt.ylabel('Frequency [Hz]')
+        plt.xlabel('Time [sec]')
+        plt.colorbar(label='Intensity [dB]')
+
+        # Adjust layout and save
+        plt.tight_layout()
+        plt.savefig('../result/spectrogram_comparison.png')
+        plt.close()
+
+        # Recombine channels if stereo
+        if audio_data.ndim == 2 and audio_data.shape[1] == 2:
+            compensated_audio = np.column_stack((compensated_left, compensated_right))
+        else:
+            compensated_audio = compensated_left
+
+        # Normalization
         max_val = np.max(np.abs(compensated_audio))
         if max_val > 0:
-            compensated_audio /= max_val
+            compensated_audio = compensated_audio * min(1.0, 0.99 / max_val)
 
         return compensated_audio
-
 
 
 def process_audio_file(input_file, output_file):
