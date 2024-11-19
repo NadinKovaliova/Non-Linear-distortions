@@ -16,8 +16,8 @@ def process_all_files(upload_folder, result_folder):
         input_path = os.path.join(upload_folder, filename)
 
         # Check if the file is a valid audio file
-        if os.path.isfile(input_path) and filename.endswith((".wav", ".mp3", ".flac")):
-            output_path = os.path.join(result_folder, filename)
+        if os.path.isfile(input_path) and filename.endswith((".wav", ".mp3", ".flac", ".ogg")):
+            output_path = os.path.join(result_folder, f"{os.path.splitext(filename)[0]}.mp3")
             print(f"Processing {filename}...")
 
             audio_data, sample_rate = load_audio(input_path)

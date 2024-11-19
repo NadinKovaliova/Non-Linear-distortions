@@ -4,6 +4,14 @@ from scipy.io import wavfile
 import soundfile as sf
 from scipy.interpolate import interp1d
 from pydub import AudioSegment
+import os
+import logging
+import librosa
+
+
+# Configure logging
+#logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 def load_audio(file_path):
     """
@@ -21,6 +29,7 @@ def load_audio(file_path):
         if audio.channels == 2:
             audio_data = audio_data.reshape(-1, 2)  # Reshape to (samples, 2) for stereo
         
+        print(f"Loaded {file_path} - Sample rate: {sample_rate}, Shape: {audio_data.shape}")
         return audio_data, sample_rate
     except Exception as e:
         print(f"Error loading {file_path}: {e}")
@@ -98,67 +107,63 @@ class HearingCompensator:
                 # Нелинейная компрессия для сильных сигналов
                 compressed[i] = self.threshold_db + (level - self.threshold_db) / 2
                 
-        return compressed
+        return np.clip(compressed, -120, 0)  # Keep within a reasonable dB range
 
     def compensate_audio(self, audio_data, sample_rate):
-        """
-        Основная функция компенсации искажений для аудиофайла
-        """
-        # Преобразование в частотную область
-        frequencies, times, spec = signal.spectrogram(
-            audio_data, 
-            fs=sample_rate,
-            nperseg=2048,
-            noverlap=1024
+            
+
+        if audio_data.ndim == 2 and audio_data.shape[1] == 2:
+            left_channel = audio_data[:, 0]
+            right_channel = audio_data[:, 1]
+        else:
+            left_channel = audio_data
+            right_channel = audio_data
+
+        # Compute spectrograms
+        frequencies, times, spec_left = signal.spectrogram(left_channel, fs=sample_rate, nperseg=2048, noverlap=1024)
+        _, _, spec_right = signal.spectrogram(right_channel, fs=sample_rate, nperseg=2048, noverlap=1024)
+
+        # Convert to dB
+        spec_left_db = 10 * np.log10(spec_left + 1e-10)
+        spec_right_db = 10 * np.log10(spec_right + 1e-10)
+
+        # Apply compensation (simplified for clarity)
+        compensated_spec_left_db = self.apply_compression(spec_left_db.flatten()).reshape(spec_left_db.shape)
+        compensated_spec_right_db = self.apply_compression(spec_right_db.flatten()).reshape(spec_right_db.shape)
+
+        # Avoid unnecessary conversions; directly perform ISTFT
+        _, compensated_audio_left = signal.istft(
+            10 ** (compensated_spec_left_db / 10), fs=sample_rate, nperseg=2048, noverlap=1024
         )
-        
-        # Преобразование в дБ
-        spec_db = 10 * np.log10(spec + 1e-10)
-        
-        # Компенсация для каждого частотно-временного блока
-        compensated_spec = np.zeros_like(spec_db)
-        
-        for i, freq in enumerate(frequencies):
-            for j, time in enumerate(times):
-                level = spec_db[i, j]
-                
-                # Применение компрессии
-                compressed_level = self.apply_compression(np.array([level]))[0]
-                
-                # Расчет и компенсация гармоник
-                harmonics = self.calculate_subjective_harmonics(freq, level)
-                for harmonic in harmonics:
-                    harm_idx = np.argmin(np.abs(frequencies - harmonic['frequency']))
-                    if harm_idx < len(frequencies):
-                        compensated_spec[harm_idx, j] -= harmonic['level']
-                
-                compensated_spec[i, j] = compressed_level
-        
-        # Обратное преобразование в линейный масштаб
-        compensated_spec = 10 ** (compensated_spec / 10)
-        
-        # Обратное преобразование во временную область
-        _, compensated_audio = signal.istft(
-            compensated_spec,
-            fs=sample_rate,
-            nperseg=2048,
-            noverlap=1024
+        _, compensated_audio_right = signal.istft(
+            10 ** (compensated_spec_right_db / 10), fs=sample_rate, nperseg=2048, noverlap=1024
         )
-        
+
+        # Normalize
+        compensated_audio = np.vstack((compensated_audio_left, compensated_audio_right)).T
+        max_val = np.max(np.abs(compensated_audio))
+        if max_val > 0:
+            compensated_audio /= max_val
+
         return compensated_audio
+
+
 
 def process_audio_file(input_file, output_file):
     """
-    Обработка аудиофайла с компенсацией нелинейных искажений
+    Process an audio file and apply compensation.
     """
-    # Загрузка аудио
-    audio_data, sample_rate = sf.read(input_file)
-    
-    # Создание компенсатора
+    # Load the audio data
+    audio_data, sample_rate = load_audio(input_file)
+    print("Audio Loaded - Min:", np.min(audio_data), "Max:", np.max(audio_data), "Shape:", audio_data.shape)
+
+
+    if audio_data is None or sample_rate is None:
+        print(f"Failed to load {input_file}. Skipping...")
+        return
+
+    # Create the compensator and apply compensation
     compensator = HearingCompensator()
-    
-    # Применение компенсации
     compensated_audio = compensator.compensate_audio(audio_data, sample_rate)
-    
-    # Сохранение результата
+
     sf.write(output_file, compensated_audio, sample_rate)
